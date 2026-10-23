@@ -191,6 +191,9 @@ Sri Sairam Engineering College
 * GitHub: https://github.com/yashwanthraaj1207-ops
 * LinkedIn: https://www.linkedin.com/in/yashwanthraaj1207/
 
+### Team Member:
+       Huzaifa M
+       Hrithik K
 ---
 
 ## 📄 License
