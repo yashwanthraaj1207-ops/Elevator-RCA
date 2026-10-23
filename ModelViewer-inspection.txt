@@ -1,0 +1,703 @@
+   1: // src/components/digitalTwin/ModelViewer.tsx
+   2: import React, { useEffect, useRef, useState, useMemo, useCallback } from "react";
+   3: import { Canvas, useFrame, useThree } from "@react-three/fiber";
+   4: import { OrbitControls, Line } from "@react-three/drei";
+   5: import * as THREE from "three";
+   6: import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+   7: import {
+   8:   ComponentId,
+   9:   normalizeComponentId,
+  10: } from "./componentMapping";
+  11: import {
+  12:   segmentGlbModel,
+  13:   GeometrySegmentationReport,
+  14:   SegmentedComponentData,
+  15: } from "./geometrySegmentation";
+  16: import { useElevatorStore } from "../../simulation/store";
+  17: import { useTheme } from "../../context/ThemeContext";
+  18: import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
+  19: import {
+  20:   AlertCircle,
+  21:   RotateCcw,
+  22:   Eye,
+  23:   EyeOff,
+  24:   Minimize2,
+  25:   Play,
+  26:   Pause,
+  27:   Compass,
+  28:   Focus,
+  29:   ZoomIn,
+  30:   ZoomOut,
+  31:   Maximize,
+  32:   Minimize,
+  33:   Layers,
+  34:   ChevronDown,
+  35:   Grid,
+  36:   RotateCw,
+  37:   Terminal,
+  38:   AlertOctagon,
+  39:   DoorOpen,
+  40:   Activity,
+  41: } from "lucide-react";
+  42: import { HierarchyInspectorModal } from "./HierarchyInspectorModal";
+  43: 
+  44: export const MODEL_ASSET_PATH = "/models/Elevator_D1_Working(Final)_1.glb";
+  45: 
+  46: // Cache segmented report in memory to avoid re-parsing on re-renders
+  47: let cachedSegmentationReport: GeometrySegmentationReport | null = null;
+  48: 
+  49: /**
+  50:  * Standard PBR Material definitions for all 18 individual components.
+  51:  * Strict compliance: Zero blue color. Distinct metallic/graphite/bronze/amber contrasts.
+  52:  */
+  53: interface MaterialProfile {
+  54:   color: string;
+  55:   roughness: number;
+  56:   metalness: number;
+  57: }
+  58: 
+  59: const COMPONENT_BASE_MATERIALS: Record<ComponentId, { dark: MaterialProfile; light: MaterialProfile }> = {
+  60:   traction_motor: {
+  61:     dark: { color: "#7A8272", roughness: 0.28, metalness: 0.82 },
+  62:     light: { color: "#929A8A", roughness: 0.3, metalness: 0.72 },
+  63:   },
+  64:   bearing_main: {
+  65:     dark: { color: "#D4AF6E", roughness: 0.18, metalness: 0.9 }, // Polished bronze/brass
+  66:     light: { color: "#B89A50", roughness: 0.2, metalness: 0.85 },
+  67:   },
+  68:   brake_assembly: {
+  69:     dark: { color: "#5C6456", roughness: 0.38, metalness: 0.75 }, // Machined iron brake caliper
+  70:     light: { color: "#747C6E", roughness: 0.38, metalness: 0.68 },
+  71:   },
+  72:   traction_sheave: {
+  73:     dark: { color: "#8E988A", roughness: 0.22, metalness: 0.88 }, // Cast alloy traction sheave wheel
+  74:     light: { color: "#A8B2A4", roughness: 0.24, metalness: 0.82 },
+  75:   },
+  76:   cabin_body: {
+  77:     dark: { color: "#9DA698", roughness: 0.3, metalness: 0.65 }, // Satin stainless passenger enclosure
+  78:     light: { color: "#C4CCC0", roughness: 0.3, metalness: 0.55 },
+  79:   },
+  80:   cabin_floor: {
+  81:     dark: { color: "#4E5448", roughness: 0.45, metalness: 0.6 }, // Heavy textured platform floor
+  82:     light: { color: "#6A7264", roughness: 0.45, metalness: 0.52 },
+  83:   },
+  84:   door_left: {
+  85:     dark: { color: "#B0B8AC", roughness: 0.2, metalness: 0.85 }, // Polished left door panel
+  86:     light: { color: "#D8DFD4", roughness: 0.22, metalness: 0.78 },
+  87:   },
+  88:   door_right: {
+  89:     dark: { color: "#B0B8AC", roughness: 0.2, metalness: 0.85 }, // Polished right door panel
+  90:     light: { color: "#D8DFD4", roughness: 0.22, metalness: 0.78 },
+  91:   },
+  92:   door_operator: {
+  93:     dark: { color: "#687062", roughness: 0.35, metalness: 0.75 }, // Header drive mechanism
+  94:     light: { color: "#828A7C", roughness: 0.35, metalness: 0.68 },
+  95:   },
+  96:   door_system: {
+  97:     dark: { color: "#B0B8AC", roughness: 0.2, metalness: 0.85 },
+  98:     light: { color: "#D8DFD4", roughness: 0.22, metalness: 0.78 },
+  99:   },
+ 100:   counterweight: {
+ 101:     dark: { color: "#545C4E", roughness: 0.5, metalness: 0.68 }, // Heavy ballast sub-weights
+ 102:     light: { color: "#70786A", roughness: 0.5, metalness: 0.6 },
+ 103:   },
+ 104:   guide_rail_left: {
+ 105:     dark: { color: "#869082", roughness: 0.25, metalness: 0.85 }, // Machined vertical steel T-rail
+ 106:     light: { color: "#A4AEA0", roughness: 0.26, metalness: 0.78 },
+ 107:   },
+ 108:   guide_rail_right: {
+ 109:     dark: { color: "#869082", roughness: 0.25, metalness: 0.85 }, // Machined vertical steel T-rail
+ 110:     light: { color: "#A4AEA0", roughness: 0.26, metalness: 0.78 },
+ 111:   },
+ 112:   suspension_ropes: {
+ 113:     dark: { color: "#9CA496", roughness: 0.25, metalness: 0.9 }, // Steel wire hoist cables
+ 114:     light: { color: "#B8C0B2", roughness: 0.26, metalness: 0.85 },
+ 115:   },
+ 116:   position_encoder: {
+ 117:     dark: { color: "#A89462", roughness: 0.2, metalness: 0.8 }, // Rotary encoder housing
+ 118:     light: { color: "#BEAA78", roughness: 0.2, metalness: 0.75 },
+ 119:   },
+ 120:   sensor_assembly: {
+ 121:     dark: { color: "#D4AF6E", roughness: 0.18, metalness: 0.85 }, // Telemetry sensors
+ 122:     light: { color: "#B89A50", roughness: 0.2, metalness: 0.8 },
+ 123:   },
+ 124:   safety_buffers: {
+ 125:     dark: { color: "#C69048", roughness: 0.3, metalness: 0.75 }, // Industrial amber/ochre pit buffers
+ 126:     light: { color: "#B47C36", roughness: 0.3, metalness: 0.7 },
+ 127:   },
+ 128:   shaft_frame: {
+ 129:     dark: { color: "#3E4438", roughness: 0.55, metalness: 0.5 }, // Structural shaft frame and pit bedplate
+ 130:     light: { color: "#5A6254", roughness: 0.55, metalness: 0.45 },
+ 131:   },
+ 132:   electrical_controller: {
+ 133:     dark: { color: "#4A5244", roughness: 0.4, metalness: 0.65 }, // Control cabinet
+ 134:     light: { color: "#666E60", roughness: 0.4, metalness: 0.58 },
+ 135:   },
+ 136: };
+ 137: 
+ 138: interface InteractiveComponentMeshProps {
+ 139:   data: SegmentedComponentData;
+ 140:   isSelected: boolean;
+ 141:   isHovered: boolean;
+ 142:   isFaulted: boolean;
+ 143:   isExploded: boolean;
+ 144:   isIsolated: boolean;
+ 145:   isVisible: boolean;
+ 146:   isAnySelected: boolean;
+ 147:   isDark: boolean;
+ 148:   visualMode: "shaded" | "diagnostic" | "wireframe";
+ 149:   isDraggingRef: React.RefObject<boolean>;
+ 150:   onSelect: (id: ComponentId) => void;
+ 151:   onHover: (id: ComponentId | null) => void;
+ 152:   onDoubleClick: (id: ComponentId) => void;
+ 153:   cabinVerticalOffset: number;
+ 154:   counterweightOffset: number;
+ 155:   vibrationJitter: number;
+ 156:   doorSlideOffset: number;
+ 157: }
+ 158: 
+ 159: /**
+ 160:  * Individual Interactive Mesh for a physical component sub-assembly
+ 161:  */
+ 162: const InteractiveComponentMesh: React.FC<InteractiveComponentMeshProps> = ({
+ 163:   data,
+ 164:   isSelected,
+ 165:   isHovered,
+ 166:   isFaulted,
+ 167:   isExploded,
+ 168:   isIsolated,
+ 169:   isVisible,
+ 170:   isAnySelected,
+ 171:   isDark,
+ 172:   visualMode,
+ 173:   isDraggingRef,
+ 174:   onSelect,
+ 175:   onHover,
+ 176:   onDoubleClick,
+ 177:   cabinVerticalOffset,
+ 178:   counterweightOffset,
+ 179:   vibrationJitter,
+ 180:   doorSlideOffset,
+ 181: }) => {
+ 182:   const meshRef = useRef<THREE.Mesh>(null!);
+ 183:   const currentPos = useRef(new THREE.Vector3(0, 0, 0));
+ 184: 
+ 185:   // Determine target transform
+ 186:   const targetPos = useMemo(() => {
+ 187:     const p = new THREE.Vector3(0, 0, 0);
+ 188: 
+ 189:     // Apply exploded offset if active
+ 190:     if (isExploded) {
+ 191:       p.add(data.explodedOffset);
+ 192:     }
+ 193: 
+ 194:     // Apply kinematic vertical movement based on component classification
+ 195:     if (data.isCabinPart) {
+ 196:       p.y += cabinVerticalOffset;
+ 197:       if (data.isDoorLeft) {
+ 198:         // Left door slides laterally left (-X)
+ 199:         p.x -= doorSlideOffset;
+ 200:       } else if (data.isDoorRight) {
+ 201:         // Right door slides laterally right (+X)
+ 202:         p.x += doorSlideOffset;
+ 203:       }
+ 204:     } else if (data.isCounterweight) {
+ 205:       // Counterweight travels in counter-balance opposite to cabin
+ 206:       p.y += counterweightOffset;
+ 207:     }
+ 208: 
+ 209:     // Apply micro-vibration displacement during active vibration/bearing fault
+ 210:     if (isFaulted && (data.id === "bearing_main" || data.id === "guide_rail_left")) {
+ 211:       p.x += vibrationJitter;
+ 212:       p.y += vibrationJitter * 0.5;
+ 213:     }
+ 214: 
+ 215:     return p;
+ 216:   }, [isExploded, data, cabinVerticalOffset, counterweightOffset, doorSlideOffset, isFaulted, vibrationJitter]);
+ 217: 
+ 218:   // Smooth lerp animation for translation
+ 219:   useFrame((_, delta) => {
+ 220:     if (meshRef.current) {
+ 221:       // Lerp position smoothly
+ 222:       currentPos.current.lerp(targetPos, Math.min(1, delta * 7.5));
+ 223:       meshRef.current.position.copy(currentPos.current);
+ 224:       meshRef.current.rotation.set(0, 0, 0);
+ 225:     }
+ 226:   });
+ 227: 
+ 228:   // Calculate material appearance with bright, high-contrast PBR highlights
+ 229:   const materialProps = useMemo(() => {
+ 230:     const isWire = visualMode === "wireframe";
+ 231: 
+ 232:     if (isSelected) {
+ 233:       return {
+ 234:         color: isFaulted ? "#E87568" : "#91B7A0",
+ 235:         emissive: isFaulted ? "#D45648" : "#72A083",
+ 236:         emissiveIntensity: 0.95,
+ 237:         roughness: 0.18,
+ 238:         metalness: 0.88,
+ 239:         transparent: false,
+ 240:         opacity: 1.0,
+ 241:         wireframe: isWire,
+ 242:       };
+ 243:     }
+ 244: 
+ 245:     if (isFaulted) {
+ 246:       return {
+ 247:         color: "#E87568",
+ 248:         emissive: "#A6382F",
+ 249:         emissiveIntensity: 0.85,
+ 250:         roughness: 0.25,
+ 251:         metalness: 0.78,
+ 252:         transparent: false,
+ 253:         opacity: 1.0,
+ 254:         wireframe: isWire,
+ 255:       };
+ 256:     }
+ 257: 
+ 258:     if (isHovered) {
+ 259:       return {
+ 260:         color: "#C2DFCE",
+ 470:   // Viewport Settings
+ 471:   const [showGrid, setShowGrid] = useState<boolean>(true);
+ 472:   const [visualMode, setVisualMode] = useState<"shaded" | "diagnostic" | "wireframe">("shaded");
+ 473:   const [autoRotate, setAutoRotate] = useState<boolean>(false);
+ 474:   const [showHierarchyModal, setShowHierarchyModal] = useState<boolean>(false);
+ 475: 
+ 476:   // Camera State (Framed dynamically to fit full 3.8m elevator assembly without cropping)
+ 477:   const defaultTarget = useMemo(() => new THREE.Vector3(0, 0.1, 0), []);
+ 478:   const defaultIsometricPos = useMemo(() => new THREE.Vector3(4.2, 1.4, 6.2), []);
+ 479: 
+ 480:   const [cameraTransition, setCameraTransition] = useState<CameraTransitionTarget>({
+ 481:     target: defaultTarget.clone(),
+ 482:     position: defaultIsometricPos.clone(),
+ 483:     isAnimating: false,
+ 484:   });
+ 485: 
+ 486:   const handleTransitionComplete = useCallback(() => {
+ 487:     setCameraTransition((prev) => ({ ...prev, isAnimating: false }));
+ 488:   }, []);
+ 489: 
+ 490:   const [activePreset, setActivePreset] = useState<CameraPreset>("isometric");
+ 491:   const [presetDropdownOpen, setPresetDropdownOpen] = useState<boolean>(false);
+ 492:   const [visualModeDropdownOpen, setVisualModeDropdownOpen] = useState<boolean>(false);
+ 493: 
+ 494:   const [retryTrigger, setRetryTrigger] = useState<number>(0);
+ 495:   const controlsRef = useRef<OrbitControlsImpl>(null);
+ 496:   const pointerStartPos = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+ 497:   const isDraggingRef = useRef<boolean>(false);
+ 498: 
+ 499:   // Store bindings
+ 500:   const storeSelectedComponent = useElevatorStore((s) => s.selectedComponent);
+ 501:   const storeSelectComponent = useElevatorStore((s) => s.selectComponent);
+ 502:   const activeFault = useElevatorStore((s) => s.activeFault);
+ 503:   const motion = useElevatorStore((s) => s.motion);
+ 504:   const running = useElevatorStore((s) => s.running);
+ 505:   const startSimulation = useElevatorStore((s) => s.startSimulation);
+ 506:   const pauseSimulation = useElevatorStore((s) => s.pauseSimulation);
+ 507:   const resetSimulation = useElevatorStore((s) => s.resetSimulation);
+ 508:   const simSpeed = useElevatorStore((s) => s.simSpeed);
+ 509:   const setSimSpeed = useElevatorStore((s) => s.setSimSpeed);
+ 510:   const emergencyStop = useElevatorStore((s) => s.emergencyStop);
+ 511:   const toggleDoorCycle = useElevatorStore((s) => s.toggleDoorCycle);
+ 512:   const requestFloor = useElevatorStore((s) => s.requestFloor);
+ 513:   const floors = useElevatorStore((s) => s.floors);
+ 514: 
+ 515:   const effectiveSelectedId = normalizeComponentId(selectedComponent || storeSelectedComponent);
+ 516:   const activeFaultId = normalizeComponentId(activeFault?.affectedComponent);
+ 517: 
+ 518:   // Fullscreen event listener
+ 519:   useEffect(() => {
+ 520:     const handleFullscreenChange = () => {
+ 521:       setIsFullscreen(!!document.fullscreenElement);
+ 522:     };
+ 523:     document.addEventListener("fullscreenchange", handleFullscreenChange);
+ 524:     return () => {
+ 525:       document.removeEventListener("fullscreenchange", handleFullscreenChange);
+ 526:     };
+ 527:   }, []);
+ 528: 
+ 529:   const toggleFullscreen = () => {
+ 530:     if (!containerRef.current) return;
+ 531:     if (!document.fullscreenElement) {
+ 532:       containerRef.current.requestFullscreen().catch((err) => {
+ 533:         console.error("Fullscreen request failed:", err);
+ 534:       });
+ 535:     } else {
+ 536:       document.exitFullscreen().catch((err) => {
+ 537:         console.error("Exit fullscreen failed:", err);
+ 538:       });
+ 539:     }
+ 540:   };
+ 541: 
+ 542:   // Keyboard Navigation: Escape to cancel isolation / exit fullscreen / clear selection
+ 543:   useEffect(() => {
+ 544:     const handleKeyDown = (e: KeyboardEvent) => {
+ 545:       if (e.key === "Escape") {
+ 546:         if (isIsolated) {
+ 547:           setIsIsolated(false);
+ 548:         } else if (isExploded) {
+ 549:           setIsExploded(false);
+ 550:         } else if (effectiveSelectedId) {
+ 551:           storeSelectComponent("");
+ 552:           if (onSelectComponent) onSelectComponent("");
+ 553:         }
+ 554:       }
+ 555:     };
+ 556:     window.addEventListener("keydown", handleKeyDown);
+ 557:     return () => window.removeEventListener("keydown", handleKeyDown);
+ 558:   }, [isIsolated, isExploded, effectiveSelectedId, storeSelectComponent, onSelectComponent]);
+ 559: 
+ 560:   // Load and segment 3D asset into real physical component meshes
+ 561:   useEffect(() => {
+ 562:     if (cachedSegmentationReport) {
+ 563:       setReport(cachedSegmentationReport);
+ 564:       setLoadStatus("success");
+ 565:       setStatusMessage("Model loaded from memory cache");
+ 566:       return;
+ 567:     }
+ 568: 
+ 569:     setLoadStatus("loading");
+ 570:     setStatusMessage("Loading authentic Meshy elevator asset...");
+ 571: 
+ 572:     const loader = new GLTFLoader();
+ 573: 
+ 574:     loader.load(
+ 575:       MODEL_ASSET_PATH,
+ 576:       (gltf) => {
+ 577:         try {
+ 578:           const segmentation = segmentGlbModel(gltf.scene);
+ 579:           cachedSegmentationReport = segmentation;
+ 580:           setReport(segmentation);
+ 581:           setLoadStatus("success");
+ 582:           setStatusMessage("Segmented 8 physical component assemblies");
+ 583:         } catch (err: unknown) {
+ 584:           const message = err instanceof Error ? err.message : String(err);
+ 585:           setLoadStatus("error");
+ 586:           setStatusMessage(`Error parsing 3D model geometry: ${message}`);
+ 587:         }
+ 588:       },
+ 589:       (progress) => {
+ 590:         if (progress.total > 0) {
+ 591:           const pct = Math.round((progress.loaded / progress.total) * 100);
+ 592:           setStatusMessage(`Loading 3D asset (${pct}%)...`);
+ 593:         }
+ 594:       },
+ 595:       (error) => {
+ 596:         console.error("GLTF load failed:", error);
+ 597:         setLoadStatus("error");
+ 598:         setStatusMessage(
+ 599:           `Unable to load 3D model asset from "${MODEL_ASSET_PATH}". Please verify public/models/elevator_rca.glb exists.`
+ 600:         );
+ 601:       }
+ 602:     );
+ 603:   }, [retryTrigger]);
+ 604: 
+ 605:   const handleSelect = useCallback(
+ 606:     (id: ComponentId) => {
+ 607:       storeSelectComponent(id);
+ 608:       if (onSelectComponent) {
+ 609:         onSelectComponent(id);
+ 610:       }
+ 611:     },
+ 612:     [storeSelectComponent, onSelectComponent]
+ 613:   );
+ 614: 
+ 615:   // Double-click to directly focus camera on component centroid
+ 616:   const handleDoubleClickFocus = useCallback(
+ 617:     (id: ComponentId) => {
+ 618:       handleSelect(id);
+ 619:       if (report?.components[id]) {
+ 620:         const comp = report.components[id];
+ 621:         const target = comp.localCenter.clone();
+ 622:         if (isExploded) {
+ 623:           target.add(comp.explodedOffset);
+ 624:         }
+ 625:         setCameraTransition({
+ 626:           target,
+ 627:           position: new THREE.Vector3(target.x + 2.8, target.y + 1.2, target.z + 3.8),
+ 628:           isAnimating: true,
+ 629:         });
+ 630:       }
+ 631:     },
+ 632:     [handleSelect, report, isExploded]
+ 633:   );
+ 634: 
+ 635:   // Restore Complete Assembly (resets explosion, isolation, hidden parts, and camera)
+ 636:   const handleRestoreAssembly = () => {
+ 637:     setIsExploded(false);
+ 638:     setIsIsolated(false);
+ 639:     setHiddenComponents(new Set());
+ 640:     setActivePreset("isometric");
+ 720: 
+ 721:   // Coordinated Kinematic Animation Variables
+ 722:   // In centered 3D coordinates: Ground -> Y = -0.80m; Top Floor -> Y = +0.75m
+ 723:   const maxTravelElev = Math.max(1, (floors.length - 1) * 3.2);
+ 724:   const normalizedTravel = Math.max(0, Math.min(1, motion.position / maxTravelElev));
+ 725:   const cabinVerticalOffset = normalizedTravel * 1.55 - 0.80;
+ 726:   const counterweightOffset = -cabinVerticalOffset;
+ 727:   const doorSlideOffset = (motion.doorProgress / 100) * 0.16;
+ 728:   const vibrationJitter =
+ 729:     activeFaultId === "bearing_main" || activeFaultId === "guide_rail_left"
+ 730:       ? Math.sin(Date.now() * 0.05) * 0.025
+ 731:       : 0;
+ 732: 
+ 733:   const isDark = theme === "dark";
+ 734:   const canvasBg = isDark ? "#161815" : "#ECEAE1";
+ 735:   const gridPrimary = isDark ? "#383E34" : "#D4D0C4";
+ 736:   const gridSecondary = isDark ? "#222620" : "#E2DFD6";
+ 737: 
+ 738:   return (
+ 739:     <div
+ 740:       ref={containerRef}
+ 741:       className={`relative flex flex-col rounded-xl border border-border overflow-hidden transition-colors ${className}`}
+ 742:       style={{ backgroundColor: canvasBg }}
+ 743:       onPointerDown={(e) => {
+ 744:         setPresetDropdownOpen(false);
+ 745:         setVisualModeDropdownOpen(false);
+ 746:         pointerStartPos.current = { x: e.clientX, y: e.clientY };
+ 747:         isDraggingRef.current = false;
+ 748:       }}
+ 749:       onPointerMove={(e) => {
+ 750:         const dist = Math.hypot(
+ 751:           e.clientX - pointerStartPos.current.x,
+ 752:           e.clientY - pointerStartPos.current.y
+ 753:         );
+ 754:         if (dist > 6) {
+ 755:           isDraggingRef.current = true;
+ 756:         }
+ 757:       }}
+ 758:     >
+ 759:       {/* 3D Canvas Top Left: Model Status Pill & Active Selection */}
+ 760:       <div className="absolute top-3 left-3 z-20 pointer-events-auto max-w-[calc(100%-180px)]">
+ 761:         <div className="flex items-center gap-2 bg-card/92 backdrop-blur-md px-3 py-1.5 rounded-lg border border-border shadow-card text-xs">
+ 762:           <div
+ 763:             className={`w-2 h-2 rounded-full shrink-0 ${
+ 764:               loadStatus === "success"
+ 765:                 ? "bg-sage shadow-sm shadow-sage"
+ 766:                 : loadStatus === "loading"
+ 767:                 ? "bg-amber-warm animate-pulse"
+ 768:                 : "bg-coral"
+ 769:             }`}
+ 770:           />
+ 771:           <span className="font-semibold text-text-primary truncate max-w-[140px] sm:max-w-[220px]">
+ 772:             {effectiveSelectedId && report?.components[effectiveSelectedId]
+ 773:               ? report.components[effectiveSelectedId].label
+ 774:               : "Complete Assembly"}
+ 775:           </span>
+ 776:           {isExploded && (
+ 777:             <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-amber-warm/15 text-amber-warm border border-amber-warm/30 shrink-0">
+ 778:               EXPLODED
+ 779:             </span>
+ 780:           )}
+ 781:           {isIsolated && (
+ 782:             <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-sage/15 text-sage border border-sage/30 shrink-0">
+ 783:               ISOLATED
+ 784:             </span>
+ 785:           )}
+ 786:         </div>
+ 787:       </div>
+ 788: 
+ 789:       {/* 3D Canvas Top Right: Action Controls & Navigation Toolbar */}
+ 790:       <div className="absolute top-3 right-3 z-20 flex items-center justify-end pointer-events-auto">
+ 791:         <div className="flex items-center gap-1 bg-card/92 backdrop-blur-md p-1 rounded-lg border border-border shadow-card text-xs">
+ 792:           {/* Camera Preset Dropdown */}
+ 793:           <div className="relative">
+ 794:             <button
+ 795:               onClick={() => {
+ 796:                 setPresetDropdownOpen((prev) => !prev);
+ 797:                 setVisualModeDropdownOpen(false);
+ 798:               }}
+ 799:               className="px-2 py-1 rounded-md bg-surface hover:bg-surface-hover text-text-secondary hover:text-text-primary transition-colors flex items-center gap-1 border border-border text-[11px]"
+ 800:               title="Camera View Angle Presets"
+ 801:             >
+ 802:               <span className="capitalize">{activePreset}</span>
+ 803:               <ChevronDown className="w-3 h-3 text-text-muted" />
+ 804:             </button>
+ 805: 
+ 806:             {presetDropdownOpen && (
+ 807:               <div className="absolute top-full right-0 mt-1 w-32 bg-card/95 backdrop-blur-md border border-border rounded-lg shadow-elevated p-1 z-30 flex flex-col gap-0.5">
+ 808:                 {(["isometric", "front", "side", "top"] as const).map((preset) => (
+ 809:                   <button
+ 810:                     key={preset}
+ 811:                     onClick={() => applyPreset(preset)}
+ 812:                     className={`px-2 py-1 text-left rounded text-xs capitalize transition-colors ${
+ 813:                       activePreset === preset
+ 814:                         ? "bg-sage/20 text-sage font-semibold"
+ 815:                         : "text-text-secondary hover:bg-surface hover:text-text-primary"
+ 816:                     }`}
+ 817:                   >
+ 818:                     {preset} View
+ 819:                   </button>
+ 820:                 ))}
+ 821:               </div>
+ 822:             )}
+ 823:           </div>
+ 824: 
+ 825:           {/* Fit Model to View */}
+ 826:           <button
+ 827:             onClick={handleFitModel}
+ 828:             className="p-1.5 rounded-md bg-surface hover:bg-surface-hover text-text-secondary hover:text-text-primary transition-colors border border-border"
+ 829:             title="Fit Entire Model in View"
+ 830:             aria-label="Fit Model"
+ 831:           >
+ 832:             <Focus className="w-3.5 h-3.5 text-sage" />
+ 833:           </button>
+ 834: 
+ 835:           {/* Zoom In & Out */}
+ 836:           <button
+ 837:             onClick={() => handleZoom("in")}
+ 838:             className="p-1.5 rounded-md bg-surface hover:bg-surface-hover text-text-secondary hover:text-text-primary transition-colors border border-border"
+ 839:             title="Zoom In"
+ 840:             aria-label="Zoom In"
+1020:             </>
+1021:           )}
+1022: 
+1023:           {/* Fullscreen Toggle */}
+1024:           <button
+1025:             onClick={toggleFullscreen}
+1026:             className="p-1.5 rounded-md bg-surface hover:bg-surface-hover text-text-secondary hover:text-text-primary transition-colors border border-border"
+1027:             title={isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen"}
+1028:             aria-label="Toggle Fullscreen"
+1029:           >
+1030:             {isFullscreen ? <Minimize className="w-3.5 h-3.5 text-sage" /> : <Maximize className="w-3.5 h-3.5" />}
+1031:           </button>
+1032:         </div>
+1033:       </div>
+1034: 
+1035:       {/* Main Three.js Canvas with ACESFilmic Tone Mapping and Enhanced Illumination */}
+1036:       <div className="flex-1 w-full min-h-[420px] relative">
+1037:         <Canvas
+1038:           camera={{ position: [3.8, 1.2, 5.8], fov: 38, near: 0.1, far: 100 }}
+1039:           className="h-full w-full cursor-grab active:cursor-grabbing"
+1040:           shadows
+1041:           gl={{
+1042:             toneMapping: THREE.ACESFilmicToneMapping,
+1043:             toneMappingExposure: isDark ? 1.45 : 1.25,
+1044:             antialias: true,
+1045:           }}
+1046:         >
+1047:           {/* Studio Balanced 5-Point Illumination Rig (Bright, High-Contrast & Zero Blue) */}
+1048:           <ambientLight intensity={isDark ? 1.4 : 1.35} />
+1049:           
+1050:           {/* Key Light: High front-right warm industrial spotlight */}
+1051:           <directionalLight
+1052:             position={[4.0, 5.0, 5.0]}
+1053:             intensity={isDark ? 2.4 : 2.0}
+1054:             color="#FFFDF5"
+1055:             castShadow
+1056:             shadow-mapSize={[2048, 2048]}
+1057:             shadow-bias={-0.0001}
+1058:           />
+1059: 
+1060:           {/* Fill Light: Soft neutral directional light from low front-left */}
+1061:           <directionalLight
+1062:             position={[-4.0, 2.5, 4.0]}
+1063:             intensity={isDark ? 1.5 : 1.2}
+1064:             color="#F5F0E6"
+1065:           />
+1066: 
+1067:           {/* Rim / Silhouette Light: Separates dark machine crown and hoistway */}
+1068:           <directionalLight
+1069:             position={[-2.5, 4.0, -4.5]}
+1070:             intensity={isDark ? 1.8 : 1.4}
+1071:             color="#EDE8DC"
+1072:           />
+1073: 
+1074:           {/* Machine Room Dedicated Overhead Illuminator */}
+1075:           <pointLight
+1076:             position={[0, 2.6, 0.8]}
+1077:             intensity={isDark ? 1.6 : 1.2}
+1078:             color="#F2C47E"
+1079:             distance={6.0}
+1080:           />
+1081: 
+1082:           {/* Pit / Buffer Low-Level Uplight Fill */}
+1083:           <pointLight
+1084:             position={[0, -2.5, 3.5]}
+1085:             intensity={isDark ? 1.2 : 0.9}
+1086:             color="#C8DBD0"
+1087:             distance={5.0}
+1088:           />
+1089: 
+1090:           {/* Neutral Industrial Hemisphere Illumination */}
+1091:           <hemisphereLight
+1092:             args={["#F8F6F0", isDark ? "#1C201A" : "#ECE9DF", isDark ? 0.9 : 0.7]}
+1093:           />
+1094: 
+1095:           {/* Camera Orbit Controls with Damping & Free Smooth Rotation */}
+1096:           <OrbitControls
+1097:             ref={controlsRef}
+1098:             enablePan={true}
+1099:             enableZoom={true}
+1100:             enableRotate={true}
+1101:             enableDamping={true}
+1102:             dampingFactor={0.08}
+1103:             rotateSpeed={0.85}
+1104:             zoomSpeed={1.0}
+1105:             panSpeed={0.8}
+1106:             minDistance={1.8}
+1107:             maxDistance={25.0}
+1108:             minPolarAngle={0.05}
+1109:             maxPolarAngle={Math.PI - 0.05}
+1110:             autoRotate={autoRotate}
+1111:             autoRotateSpeed={1.0}
+1112:             onStart={() => {
+1113:               // Immediately yield 100% control to user orbit/pan/zoom
+1114:               setCameraTransition((prev) => (prev.isAnimating ? { ...prev, isAnimating: false } : prev));
+1115:             }}
+1116:           />
+1117: 
+1118:           <CameraViewController
+1119:             transitionTarget={cameraTransition}
+1120:             onTransitionComplete={handleTransitionComplete}
+1121:             controlsRef={controlsRef}
+1122:           />
+1123: 
+1124:           {/* Industrial Precision Grid Floor */}
+1125:           {showGrid && (
+1126:             <gridHelper args={[8, 16, gridPrimary, gridSecondary]} position={[0, -2.1, 0]} />
+1127:           )}
+1128: 
+1129:           {/* Render Actual Decomposed Components (Direct Raycasting & Exploded Positions) */}
+1130:           {report && (
+1131:             <group>
+1132:               {/* 18 Canonical Physical Components */}
+1133:               {(Object.keys(report.components) as ComponentId[]).map((id) => {
+1134:                 const compData = report.components[id];
+1135:                 const isSelected = effectiveSelectedId === id;
+1136:                 const isHovered = hoveredComponentId === id;
+1137:                 const isFaulted = activeFaultId === id;
+1138:                 const isVisible = !hiddenComponents.has(id);
+1139: 
+1140:                 return (
+1141:                   <InteractiveComponentMesh
+1142:                     key={id}
+1143:                     data={compData}
+1144:                     isSelected={isSelected}
+1145:                     isHovered={isHovered}
+1146:                     isFaulted={isFaulted}
+1147:                     isExploded={isExploded || (isSelected && isIsolated)}
+1148:                     isIsolated={isIsolated && !isSelected}
+1149:                     isVisible={isVisible}
+1150:                     isAnySelected={!!effectiveSelectedId}
+1151:                     isDark={isDark}
+1152:                     visualMode={visualMode}
+1153:                     isDraggingRef={isDraggingRef}
+1154:                     onSelect={handleSelect}
+1155:                     onHover={setHoveredComponentId}
+1156:                     onDoubleClick={handleDoubleClickFocus}
+1157:                     cabinVerticalOffset={cabinVerticalOffset}
+1158:                     counterweightOffset={counterweightOffset}
+1159:                     vibrationJitter={vibrationJitter}
+1160:                     doorSlideOffset={doorSlideOffset}
+1161:                   />
+1162:                 );
+1163:               })}
+1164:             </group>
+1165:           )}
+1166:         </Canvas>
+1167: 
+1168:         {/* Loading Overlay */}
+1169:         {loadStatus === "loading" && (
+1170:           <div className="absolute inset-0 bg-app/75 backdrop-blur-sm flex flex-col items-center justify-center pointer-events-none z-20">
